@@ -231,4 +231,3 @@ The current example intentionally mirrors what that CLI would do internally:
 - Validate one or more CSVs
 - Emit a markdown summary
 - Exit non-zero on failure
-
