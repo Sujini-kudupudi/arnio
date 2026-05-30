@@ -40,127 +40,58 @@ def _raise_csv_path_os_error(path: str, error: OSError) -> None:
 
 
 @contextmanager
-def _materialize_csv_input(
-    path: str | os.PathLike[str] | io.IOBase,
+def _utf8_csv_path(
+    path: str,
     encoding: str,
     delimiter: str = ",",
     sample_rows: int | None = None,
-    encoding_errors: str = "strict",
 ) -> Iterator[str]:
-    """Return a UTF-8 file path for the C++ reader."""
-    
-    @contextmanager
-    def _get_src():
-        if hasattr(path, "read"):
-            if isinstance(path, (io.RawIOBase, io.BufferedIOBase)):
-                yield io.TextIOWrapper(path, encoding=encoding, errors=encoding_errors, newline="")  # type: ignore
-            else:
-                yield path
-        else:
-            with open(os.fspath(path), encoding=encoding, errors=encoding_errors, newline="") as src:
-                yield src
+    """Return a UTF-8 file path for the C++ reader.
 
-    if not hasattr(path, "read") and _is_utf8_encoding(encoding):
-        yield os.fspath(path)  # type: ignore
+    The native reader currently consumes UTF-8 bytes. For other encodings,
+    transcode through a temporary UTF-8 file so the public encoding parameter is
+    honored without leaking platform-specific decoding behavior through pybind.
+    """
+    if _is_utf8_encoding(encoding):
+        yield path
         return
 
     tmp_name: str | None = None
     try:
-        with _get_src() as src:
+        with open(path, encoding=encoding, newline="") as src:
             with tempfile.NamedTemporaryFile(
                 "w", encoding="utf-8", newline="", suffix=".csv", delete=False
             ) as tmp:
                 if sample_rows is not None:
-                    row_count = 0
-                    in_quotes = False
-                    pending_quote = False
-                    pending_cr = False
-                    last_char_was_terminator = False
-                    sample_complete = False
-
-                    while chunk := src.read(8192):
-                        chunk_len = len(chunk)
-                        index = 0
-                        while index < chunk_len:
-                            char = chunk[index]
-
-                            if sample_complete:
-                                if pending_cr and char == "\n":
-                                    tmp.write(char)
-                                pending_cr = False
-                                break
-
-                            tmp.write(char)
-
-                            if pending_cr:
-                                pending_cr = False
-                                if char == "\n":
-                                    last_char_was_terminator = True
-                                    index += 1
-                                    continue
-
-                            if char == '"':
-                                if pending_quote:
-                                    pending_quote = False
-                                elif in_quotes:
-                                    pending_quote = True
-                                else:
-                                    in_quotes = True
-                                last_char_was_terminator = False
-                            else:
-                                if pending_quote:
-                                    in_quotes = False
-                                    pending_quote = False
-
-                                if not in_quotes and char in {"\n", "\r"}:
-                                    row_count += 1
-                                    last_char_was_terminator = True
-                                    if char == "\r":
-                                        if (
-                                            index + 1 < chunk_len
-                                            and chunk[index + 1] == "\n"
-                                        ):
-                                            tmp.write("\n")
-                                            index += 1
-                                        else:
-                                            pending_cr = True
-                                    if row_count >= sample_rows:
-                                        sample_complete = True
-                                        break
-                                else:
-                                    last_char_was_terminator = False
-
-                            index += 1
-
-                        if sample_complete and not pending_cr:
+                    # Use csv.reader so we advance through complete CSV records
+                    # rather than raw physical lines. This prevents a quoted
+                    # multiline field from being split at the sampling boundary,
+                    # which would produce an invalid partial CSV for scan_schema.
+                    reader = csv.reader(src, delimiter=delimiter)
+                    writer = csv.writer(tmp, delimiter=delimiter)
+                    for row_count, row in enumerate(reader):
+                        if row_count >= sample_rows:
                             break
-
-                    if (
-                        sample_rows > 0
-                        and not last_char_was_terminator
-                        and tmp.tell() > 0
-                    ):
-                        row_count += 1
+                        writer.writerow(row)
                 else:
                     shutil.copyfileobj(src, tmp)
                 tmp_name = tmp.name
-                
-            if os.path.getsize(tmp_name) == 0:
-                raise CsvReadError("CSV file is empty")
-                
         yield tmp_name
     except LookupError as e:
         raise ValueError(f"Unknown encoding: {encoding}") from e
     except UnicodeDecodeError as e:
-        raise CsvReadError(f"Could not decode stream using encoding {encoding!r}") from e
+        raise CsvReadError(
+            f"Could not decode {path!r} using encoding {encoding!r}"
+        ) from e
     except OSError as e:
-        if hasattr(path, "read"):
-            raise CsvReadError(str(e)) from e
-        else:
-            _raise_csv_path_os_error(os.fspath(path), e)  # type: ignore
+        raise CsvReadError(str(e)) from e
     finally:
         if tmp_name is not None:
             try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+
                 os.unlink(tmp_name)
             except OSError:
                 pass
@@ -957,7 +888,7 @@ def write_csv(
 
 
 def scan_csv(
-    path: str | os.PathLike[str] | io.IOBase,
+    path: str | os.PathLike[str] | io.TextIOBase,
     *,
     delimiter: str | None = None,
     encoding: str = "utf-8",
@@ -1052,11 +983,12 @@ def scan_csv(
     >>> schema = ar.scan_csv("data.dat")              # non-standard extension accepted
     """
 
-    path = os.fspath(path)
+    path, should_cleanup, is_materialized_text = _materialize_csv_input(path)
 
-    _validate_csv_path(path, encoding)
+    try:
+        _validate_csv_path(path, encoding)
 
-    path_lower = path.lower()
+        path_lower = path.lower()
 
     # Resolve the sentinel: auto-detect tab for .tsv only when the caller
     # truly omitted delimiter (None).  An explicit delimiter="," is always
@@ -1113,6 +1045,12 @@ def scan_csv(
             return cast(dict[str, str], schema)
     except RuntimeError as e:
         raise CsvReadError(str(e)) from None
+    finally:
+        if should_cleanup and os.path.exists(path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 def read_jsonl(
