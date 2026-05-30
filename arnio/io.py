@@ -6,6 +6,7 @@ CSV reading and writing functions.
 from __future__ import annotations
 
 import codecs
+import csv
 import io
 import os
 import shutil
@@ -1016,7 +1017,9 @@ def scan_csv(
             if not isinstance(sample_size, int) or isinstance(sample_size, bool):
                 raise TypeError("sample_size must be an integer.")
             if sample_size <= 0:
-                raise ValueError("sample_size must be a positive integer greater than 0.")
+                raise ValueError(
+                    "sample_size must be a positive integer greater than 0."
+                )
             config.sample_size = sample_size
 
         reader = _CsvReader(config)

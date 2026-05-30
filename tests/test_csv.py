@@ -2999,8 +2999,8 @@ def test_scan_csv_stringio_schema_matches_path(tmp_path):
 def test_scan_csv_stringio_cleans_up_temp_file():
     """Temp file created from StringIO should be cleaned up after scan."""
     import glob
-    import tempfile
     import os
+    import tempfile
 
     before = set(glob.glob(os.path.join(tempfile.gettempdir(), "*.csv")))
     ar.scan_csv(io.StringIO("a,b\n1,2\n"))
@@ -3012,8 +3012,8 @@ def test_scan_csv_stringio_cleans_up_temp_file():
 def test_scan_csv_stringio_cleans_up_on_error():
     """Temp file should be cleaned up even when scan_csv raises an error."""
     import glob
-    import tempfile
     import os
+    import tempfile
 
     before = set(glob.glob(os.path.join(tempfile.gettempdir(), "*.csv")))
     # Empty stream should trigger CsvReadError (empty file)
