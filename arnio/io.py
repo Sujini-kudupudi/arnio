@@ -92,6 +92,7 @@ def _utf8_csv_path(
             except OSError:
                 pass
 
+
 def _validate_thousands_separator(
     thousands_separator: str | None,
     decimal_separator: str = ".",
